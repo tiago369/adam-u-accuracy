@@ -14,7 +14,7 @@ The ADAM-U model and PND's SDK are pulled in as git submodules under `third_part
 | `third_party/pnd_sdk_python` | <https://github.com/pndbotics/pnd_sdk_python> | Optional: PND's official simulator (`simulate_python`) |
 
 ```bash
-git clone --recursive <repo-url> adam-u-accuracy
+git clone --recursive https://github.com/tiago369/adam-u-accuracy.git
 cd adam-u-accuracy
 # already cloned without --recursive?
 git submodule update --init --recursive
