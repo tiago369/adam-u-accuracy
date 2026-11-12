@@ -5,3 +5,7 @@ results/raw/
 *.npz
 .ipynb_checkpoints/
 MUJOCO_LOG.TXT
+results/*_quick.json
+results/SUMMARY_quick.md
+results/figures_quick/
+results/logs/

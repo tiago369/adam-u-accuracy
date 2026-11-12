@@ -1,3 +1,4 @@
 # Core: everything the accuracy/repeatability experiments need (headless).
 mujoco==3.2.0
 numpy==2.2.6
+matplotlib==3.9.2
