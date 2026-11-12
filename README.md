@@ -28,6 +28,30 @@ FK is logged in parallel to split servo error from kinematic error.
    within 8 µm on AP. On the noise-floor RP it reads 0.12 mm against a true 0.09 mm, below the 4:1 uncertainty
    ratio. A laser tracker (floor 0.008 mm) is needed only if RP itself is the target.
 
+## Results in figures
+
+**Each mechanism alone (E1).** Every mechanism moves the accuracy (left, log scale), but none of them moves the
+ISO repeatability (right), which stays at the noise floor. Where the orange bar (encoder FK) is shorter than the
+blue one (ground truth), the robot cannot see its own error. This is the case for zero offsets, link geometry,
+backlash and compliance.
+
+![Accuracy and repeatability with each error mechanism alone](results/figures/e1_ofat.png)
+
+**Which factors matter (E2, 2^(6-1) factorial).** Joint zero offsets dominate the true AP. From the encoders the
+picture is different: friction and the inertial model dominate the servo error they see. RP effects are below
+0.015 mm, which means no factor moves ISO repeatability.
+
+![Factorial effects on AP and RP](results/figures/e2_factorial.png)
+
+**The realistic robot (E3).** Left: AP of 30 virtual robots with every mechanism on, split into the part the
+encoders see (servo) and the part only an external instrument sees (kinematic + post-encoder). Right: approaching
+the same pose from six directions exposes friction (vAP 9-12 mm), which the one-direction ISO cycle hides. Backlash
+is preloaded by gravity and stays at the baseline.
+
+![Fleet accuracy split and multi-directional accuracy](results/figures/e3_realistic.png)
+
+All numbers: [`results/SUMMARY.md`](results/SUMMARY.md).
+
 ## Install
 
 ### 1. Clone with submodules
