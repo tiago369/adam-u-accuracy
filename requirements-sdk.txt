@@ -1,0 +1,6 @@
+# Optional: only to run PND's official simulator (third_party/pnd_mujoco/simulate_python).
+-r requirements.txt
+-e third_party/pnd_sdk_python
+cyclonedds==0.10.2
+opencv-python==5.0.0.93
+pygame==2.6.1

@@ -1,0 +1,7 @@
+[submodule "third_party/pnd_mujoco"]
+	path = third_party/pnd_mujoco
+	url = https://github.com/pndbotics/pnd_mujoco.git
+[submodule "third_party/pnd_sdk_python"]
+	path = third_party/pnd_sdk_python
+	url = https://github.com/pndbotics/pnd_sdk_python.git
+	ignore = dirty
