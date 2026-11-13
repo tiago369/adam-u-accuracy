@@ -74,6 +74,14 @@ def fig_ofat(e1, lines):
         lines.append(f"| {labels[c]} | {f('ground_truth', 'AP')} | {f('encoder_fk', 'AP')} | {f('mocap', 'AP')} | "
                      f"{f('ground_truth', 'RP')} | {f('mocap', 'RP')} | "
                      f"{'' if ci is None else f'{ci[worst, 0]:.3f}–{ci[worst, 1]:.3f}'} |")
+    lines += ['', 'Orientation, hand-to-hand and distance metrics (ground truth, mean over poses and arms; '
+              'AP_o = |(AP_a, AP_b, AP_c)|, RP_o = max(RP_a, RP_b, RP_c); hand-to-hand = left TCP − right TCP; '
+              'AD/RD between P2 and P4):', '',
+              '| Mechanism | AP_o (°) | RP_o (°) | hand-to-hand AP | hand-to-hand RP | AD (abs) | RD |', '|---|---|---|---|---|---|---|']
+    for c in order:
+        g = lambda k: np.mean(get(c, 'ground_truth', k))
+        lines.append(f"| {labels[c]} | {g('APo_mean'):.3f} | {g('RPo_mean'):.4f} | {g('H2H_AP_mean'):.3f} | "
+                     f"{g('H2H_RP_mean'):.3f} | {g('AD_mean'):.3f} | {g('RD_mean'):.3f} |")
     lines += ['', f'![E1]({os.path.basename(FIG)}/e1_ofat.png)', '']
 
 
@@ -95,11 +103,17 @@ def fig_factorial(e2, lines):
     lines += ['## E2: 2^(6-1) fractional factorial', '',
               f"32 cells × {e2['units']} units × {e2['n_cycles']} cycles. Factors: " +
               ', '.join(f'{k} = {v}' for k, v in fac.items()) + '. Effect = mean(high) − mean(low) of the cell means.', '',
-              '| Response | Top effects (effect in mm, % of variance) |', '|---|---|']
-    for k, title in keys + [('AP_mocap', 'AP, virtual mocap')]:
+              'Standard error of every effect from the spread between the units of each cell (t = effect / se).', '',
+              '| Response | se (mm) | Top effects: effect in mm (% of variance, t) |', '|---|---|---|']
+    for k, title in keys + [('AP_mocap', 'AP, virtual mocap'), ('H2H_AP_truth', 'hand-to-hand AP, ground truth')]:
+        if k not in e2['responses']:
+            continue
         eff = e2['responses'][k]['effects']
         top = sorted(eff.items(), key=lambda kv: -kv[1]['pct'])[:5]
-        lines.append(f"| {title} | " + ', '.join(f"{n} {e['effect']:+.3f} ({e['pct']:.0f} %)" for n, e in top) + ' |')
+        se = next(iter(eff.values())).get('se')
+        tt = lambda e: f", t {e['t']:.0f}" if e.get('t') is not None else ''
+        lines.append(f"| {title} | {'' if se is None else f'{se:.3f}'} | " +
+                     ', '.join(f"{n} {e['effect']:+.3f} ({e['pct']:.0f} %{tt(e)})" for n, e in top) + ' |')
     y = np.array(e2['responses']['RP_truth']['cell_means'])
     lines += ['', f'RP across the 32 cells: min {y.min():.3f} mm, median {np.median(y):.3f} mm, max {y.max():.3f} mm.', '',
               f'![E2]({os.path.basename(FIG)}/e2_factorial.png)', '']
@@ -132,8 +146,10 @@ def fig_e3(e3, quick, lines):
     for i, (lab, col) in enumerate([('total (ground truth)', C1), ('servo (encoder FK)', C2),
                                     ('kinematic + post-encoder', C3)]):
         if len(sp):
-            yy = 2 - i + rng.uniform(-0.15, 0.15, len(sp))
-            axs[0].scatter(sp[:, i], yy, s=22, color=col, edgecolor=SURF, linewidth=0.8, label=lab, zorder=3)
+            yy = 2 - i + rng.uniform(-0.25, 0.25, len(sp))
+            big = len(sp) > 100
+            axs[0].scatter(sp[:, i], yy, s=4 if big else 22, color=col, alpha=0.35 if big else 1,
+                           edgecolor='none' if big else SURF, linewidth=0.8, label=lab, zorder=3)
             axs[0].plot([np.median(sp[:, i])] * 2, [2 - i - 0.3, 2 - i + 0.3], color=INK, lw=2, zorder=4)
     axs[0].set_yticks([2, 1, 0], ['total\n(truth)', 'servo\n(encoder FK)', 'kinematic +\npost-encoder'])
     axs[0].set_xlabel('AP per robot, mean of 10 pose×arm (mm)'); axs[0].set_xlim(left=0)
@@ -175,6 +191,86 @@ def fig_e3(e3, quick, lines):
     lines += ['', f'![E3]({os.path.basename(FIG)}/e3_realistic.png)', '']
 
 
+def fig_e4(e4, e1, lines):
+    joints = ['shoulderPitch', 'shoulderRoll', 'shoulderYaw', 'elbow', 'wristYaw', 'wristPitch', 'wristRoll']
+    iso = e4['iso230']['runs']
+    get230 = lambda pl, jn, side, k: next(r['res'][side][k] for r in iso if r['plant'] == pl and r['joint'] == jn)
+    dw = {r['plant']: r['res'] for r in e4['dwell']['runs']}
+    fig, axs = plt.subplots(1, 2, figsize=(10.5, 3.8), gridspec_kw=dict(wspace=0.3))
+    x = np.arange(len(joints)); w = 0.26
+    for j, (pl, col) in enumerate(zip(['baseline', 'friction', 'all_on'], [C1, C2, C3])):
+        axs[0].bar(x + (j - 1) * w, [get230(pl, jn, 'link', 'B') for jn in joints], width=w - 0.03, color=col,
+                   label={'all_on': 'all on'}.get(pl, pl))
+    axs[0].set_xticks(x, [j.replace('shoulder', 'sh.').replace('wrist', 'wr.') for j in joints], rotation=30)
+    axs[0].set_yscale('log'); axs[0].set_ylim(bottom=0.01)
+    axs[0].set_ylabel('reversal B at the link (mrad, log)')
+    axs[0].set_title('ISO 230-2 per joint, left arm', loc='left', color=INK)
+    axs[0].legend(loc='upper center', bbox_to_anchor=(0.5, -0.25), ncol=3)
+    plants = [p for p in ['baseline', 'compliance', 'backlash', 'friction', 'all_on'] if p in dw]
+    for pl, col, mk in zip(plants, [C1, '#e87ba4', '#6250d6', C2, C3], ['o', 's', 'D', '^', 'v']):
+        v = [dw[pl][k] for k in ('AP_2s', 'AP_4s', 'AP_8s')]
+        axs[1].plot([2, 4, 8], v, marker=mk, ms=6, lw=2, color=col, label={'all_on': 'all on'}.get(pl, pl),
+                    markeredgecolor=SURF)
+    axs[1].set_yscale('log'); axs[1].set_xticks([2, 4, 8]); axs[1].set_xlabel('measurement instant after arrival (s)')
+    axs[1].set_ylabel('AP, mean of 10 pose×arm (mm, log)')
+    axs[1].set_title('Dwell sensitivity: when is "attained"?', loc='left', color=INK)
+    axs[1].legend(loc='center left', bbox_to_anchor=(1.0, 0.5))
+    fig.savefig(os.path.join(FIG, 'e4_extras.png'), dpi=160, bbox_inches='tight'); plt.close(fig)
+
+    lines += ['## E4: remaining design blocks', '']
+    # a. palm in
+    labels = dict(baseline='baseline', compliance='series compliance', backlash='backlash', mass_com='mass/CoM',
+                  friction='friction', geometry='link geometry', zero_offset='zero offsets', gains_mjex='pnd_mujoco gains',
+                  payload='payload 0.5 kg')
+    pi, pd = by_cell(e4['palm_in']['runs']), by_cell(e1['runs']) if e1 else {}
+    m = lambda cells, c, k: np.mean([u['metrics']['ground_truth'][k] for u in cells[c]])
+    lines += ['**a. Tool orientation.** The E1 cells with the palm in instead of down (ground truth, mm and °).', '',
+              '| Mechanism | AP palm down | AP palm in | RP palm down | RP palm in | AP_o palm down | AP_o palm in |',
+              '|---|---|---|---|---|---|---|']
+    for c in labels:
+        if c in pi and c in pd:
+            lines.append(f"| {labels[c]} | {m(pd, c, 'AP_mean'):.3f} | {m(pi, c, 'AP_mean'):.3f} | {m(pd, c, 'RP_mean'):.3f} | "
+                         f"{m(pi, c, 'RP_mean'):.3f} | {m(pd, c, 'APo_mean'):.3f} | {m(pi, c, 'APo_mean'):.3f} |")
+    # b. vAP extra
+    vx = e4['vap_extra']['runs']
+    lines += ['', '**b. vAP at the extra poses** (left arm, mm; P6 = arm almost hanging, low gravity load; '
+              'P7 = arm extended forward). Directions out of reach are skipped.', '',
+              '| Plant | P6 | P7 |', '|---|---|---|']
+    for pl in ['baseline', 'backlash', 'friction', 'all_on']:
+        row = []
+        for pn in ['P6', 'P7']:
+            r = [r for r in vx if r['plant'] == pl and r['pose'] == pn]
+            row.append(f"{r[0]['res']['Left']['vAP']:.3f} ({len(r[0]['res']['Left']['dirs'])} dirs)" if r else '')
+        lines.append(f'| {pl} | ' + ' | '.join(row) + ' |')
+    # c. dwell
+    lines += ['', f"**c. Dwell, stabilisation, overshoot and creep** (ISO cycle with an 8 s dwell; stabilisation band "
+              f"{e4['dwell']['band_mm']:.1f} mm on the 50 ms-smoothed TCP).", '',
+              '| Plant | AP at 2 s | AP at 4 s | AP at 8 s | max change 4→8 s | stabilisation mean (max), s | '
+              'overshoot mean (max), mm | creep mean (max), µm/s |', '|---|---|---|---|---|---|---|---|']
+    for pl in plants:
+        r = dw[pl]
+        lines.append(f"| {pl} | {r['AP_2s']:.3f} | {r['AP_4s']:.3f} | {r['AP_8s']:.3f} | {r['dAP_4_8_max']:.3f} | "
+                     f"{r['t_stab_mean']:.2f} ({r['t_stab_max']:.2f}) | {r['overshoot_mean']:.2f} ({r['overshoot_max']:.2f}) | "
+                     f"{r['creep_mean']:.0f} ({r['creep_max']:.0f}) |")
+    # d. ISO 230-2
+    lines += ['', f"**d. ISO 230-2 per joint** (left arm, 5 targets over ±0.15 rad around P1, {e4['iso230']['n_cycles']} "
+              'bidirectional cycles, 5 s dwell). Reversal B and repeatability R in mrad, read at the link / at the encoder.', '',
+              '| Plant | ' + ' | '.join(joints) + ' |', '|---|' + '---|' * len(joints)]
+    for pl in [p for p in ['baseline', 'compliance', 'backlash', 'friction', 'all_on'] if any(r['plant'] == p for r in iso)]:
+        lines.append(f'| {pl}: B | ' + ' | '.join(f"{get230(pl, jn, 'link', 'B'):.2f} / {get230(pl, jn, 'enc', 'B'):.2f}"
+                                                  for jn in joints) + ' |')
+        lines.append(f'| {pl}: R | ' + ' | '.join(f"{get230(pl, jn, 'link', 'R'):.2f} / {get230(pl, jn, 'enc', 'R'):.2f}"
+                                                  for jn in joints) + ' |')
+    # e. stiffness
+    lines += ['', f"**e. Static compliance at the left TCP** (±{e4['stiffness']['force_N']:g} N along x, y, z; eigenvalues "
+              'of the symmetric part of the 3×3 compliance matrix, mm/N).', '', '| Controller / plant | P1 | P7 |', '|---|---|---|']
+    st = e4['stiffness']['runs']
+    for pl in ['sdk', 'sdk+spring', 'mujoco_ex', 'mujoco_ex+spring']:
+        cell = lambda pn: ', '.join(f'{v:.2f}' for v in next(r['eig'] for r in st if r['plant'] == pl and r['pose'] == pn))
+        lines.append(f'| {pl} | {cell("P1")} | {cell("P7")} |')
+    lines += ['', f'![E4]({os.path.basename(FIG)}/e4_extras.png)', '']
+
+
 def main():
     global FIG
     quick = '--quick' in sys.argv
@@ -209,6 +305,9 @@ def main():
     e3 = load('e3_realistic', quick)
     if e3:
         fig_e3(e3, quick, lines)
+    e4 = load('e4_extras', quick)
+    if e4:
+        fig_e4(e4, e1, lines)
     path = os.path.join(RESULTS, f"SUMMARY{'_quick' if quick else ''}.md")
     open(path, 'w').write('\n'.join(lines) + '\n')
     print('wrote', path)

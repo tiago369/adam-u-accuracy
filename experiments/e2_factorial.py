@@ -8,7 +8,7 @@ Factors, low / high:
     D  backlash                  0 / 0.2 deg total gap on the arm joints
     E  series compliance         rigid / 3000 N.m/rad on the 4 proximal arm joints
     F  gain set                  SDK / pnd_mujoco example (10x kp on shoulder pitch and roll)
-32 cells x U units (common random numbers: unit u is the same virtual robot in every cell) x 30 cycles.
+32 cells x 30 units (common random numbers: unit u is the same virtual robot in every cell) x 30 cycles.
 Resolution VI: main effects and all two-factor interactions are clear of each other (aliased only with 4- and
 5-factor interactions). Responses per unit: AP (ground truth), AP seen by encoder FK, RP (ground truth).
 Effects are computed on cell means; % contribution = SS_effect / SS_total.
@@ -44,25 +44,33 @@ def cell_name(row):
     return ''.join(FACTORS[i].lower() if x > 0 else '-' for i, x in enumerate(row))
 
 
-def effects(X, y):
-    """Main effects and two-factor interactions of response y (one value per row of X)."""
+def effects(X, y, Y=None):
+    """Main effects and two-factor interactions of response y (one value per row of X).
+    Y (cells x units), if given, adds a standard error per effect from the pooled between-unit variance:
+    se = sqrt(4 s^2 / (N U)). Units are the same robots in every cell (common random numbers), which makes this
+    conservative for main effects."""
     cols = {f: X[:, i] for i, f in enumerate(FACTORS)}
     for i, j in itertools.combinations(range(6), 2):
         cols[FACTORS[i] + FACTORS[j]] = X[:, i] * X[:, j]
     ss_tot = ((y - y.mean()) ** 2).sum()
+    se = None
+    if Y is not None and Y.shape[1] > 1:
+        se = float(np.sqrt(4 * Y.var(1, ddof=1).mean() / Y.size))
     out = {}
     for k, c in cols.items():
         eff = y[c > 0].mean() - y[c < 0].mean()
         out[k] = dict(effect=float(eff), pct=float(100 * len(y) * eff ** 2 / 4 / ss_tot))
+        if se is not None:
+            out[k].update(se=se, t=float(eff / se) if se > 0 else None)
     return out
 
 
 def main():
     args = parse(__doc__)
-    units, n = (1, 5) if args.quick else (3, 30)
+    units, n = (1, 5) if args.quick else (30, 30)
     X = design()
     jobs = [dict(exp='e2', cell=cell_name(r), scenario=scenario_dict(scenario(r)), unit=u, n_cycles=n,
-                 instruments=['ground_truth', 'encoder_fk', 'mocap'])
+                 instruments=['ground_truth', 'encoder_fk', 'mocap'], slim=True)
             for r in X for u in range(units)]
     res = run_jobs(jobs, args.procs)
     by_cell = {}
@@ -70,9 +78,11 @@ def main():
         by_cell.setdefault(r['cell'], []).append(r)
     resp = {}
     for key, inst, metric in [('AP_truth', 'ground_truth', 'AP_mean'), ('AP_encoder', 'encoder_fk', 'AP_mean'),
-                              ('RP_truth', 'ground_truth', 'RP_mean'), ('AP_mocap', 'mocap', 'AP_mean')]:
-        y = np.array([np.mean([u['metrics'][inst][metric] for u in by_cell[cell_name(r)]]) for r in X])
-        resp[key] = dict(cell_means=y, effects=effects(X, y))
+                              ('RP_truth', 'ground_truth', 'RP_mean'), ('AP_mocap', 'mocap', 'AP_mean'),
+                              ('H2H_AP_truth', 'ground_truth', 'H2H_AP_mean')]:
+        Y = np.array([[u['metrics'][inst][metric] for u in by_cell[cell_name(r)]] for r in X])
+        y = Y.mean(1)
+        resp[key] = dict(cell_means=y, unit_sd=Y.std(1, ddof=1) if Y.shape[1] > 1 else None, effects=effects(X, y, Y))
     for key, v in resp.items():
         top = sorted(v['effects'].items(), key=lambda kv: -kv[1]['pct'])[:6]
         print(f'{key}: ' + ', '.join(f"{k} {e['effect']:+.3f} mm ({e['pct']:.0f}%)" for k, e in top))

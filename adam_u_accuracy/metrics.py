@@ -8,6 +8,10 @@ about the commanded tool axes x, y, z:
     AP_a = mean(a_j) (likewise b, c),   RP_a = 3 S_a.
 Multi-directional pose accuracy variation (approach from several directions, same commanded pose):
     vAP_p = max over direction pairs of || mean_h(x) - mean_k(x) ||.
+Distance accuracy (ISO 9283 sec. 7.4), here between the attained P2 and P4 of each cycle:
+    AD_p = mean(D_j) - D_c,  RD_p = 3 S_D,  D_j = || x_P4,j - x_P2,j ||.
+Relative hand-to-hand error (bimanual metric, not an instrument): the same AP/RP formulas applied to the vector
+d_j = x_left,j - x_right,j against its commanded value; it is what matters when both hands hold one object.
 RP also gets a percentile-bootstrap 95 % CI over cycles, because 3 S is an estimate from a finite sample.
 """
 import numpy as np
@@ -36,7 +40,7 @@ def bootstrap_ci(x, stat, n_boot=2000, rng=None, level=0.95):
     return float(np.quantile(vals, a)), float(np.quantile(vals, 1 - a))
 
 
-def pose_metrics(p, R, pc, Rc, ci=False, rng=None):
+def pose_metrics(p, R, pc, Rc, ci=False, rng=None, ad_pair=(3, 1)):
     """p: (C, P, A, 3) attained positions; R: (C, P, A, 3, 3); pc: (P, A, 3), Rc: (P, A, 3, 3) commanded.
     Returns arrays of shape (P, A) (mm, deg) plus aggregates."""
     C, P, A = p.shape[:3]
@@ -45,9 +49,23 @@ def pose_metrics(p, R, pc, Rc, ci=False, rng=None):
     ap = np.linalg.norm(dev, axis=-1) * 1e3
     rp = np.array([[rp_l(p[:, i, a]) for a in range(A)] for i in range(P)]) * 1e3
     e_rot = np.degrees(rotvec(np.einsum('paji,cpajk->cpaik', Rc, R)))      # (C, P, A, 3) about tool axes
-    out = dict(AP_p=ap, AP_xyz=dev * 1e3, RP_l=rp,
-               AP_abc=e_rot.mean(0), RP_abc=3 * e_rot.std(0, ddof=1),
-               AP_mean=float(ap.mean()), AP_max=float(ap.max()), RP_mean=float(rp.mean()), RP_max=float(rp.max()))
+    ap_abc, rp_abc = e_rot.mean(0), 3 * e_rot.std(0, ddof=1)
+    ap_o = np.linalg.norm(ap_abc, axis=-1)
+    out = dict(AP_p=ap, AP_xyz=dev * 1e3, RP_l=rp, AP_abc=ap_abc, RP_abc=rp_abc,
+               AP_mean=float(ap.mean()), AP_max=float(ap.max()), RP_mean=float(rp.mean()), RP_max=float(rp.max()),
+               APo_mean=float(ap_o.mean()), APo_max=float(ap_o.max()),
+               RPo_mean=float(rp_abc.max(-1).mean()), RPo_max=float(rp_abc.max()))
+    if A == 2:                                            # relative hand-to-hand error
+        dd, dc = p[:, :, 0] - p[:, :, 1], pc[:, 0] - pc[:, 1]
+        h_ap = np.linalg.norm(dd.mean(0) - dc, axis=-1) * 1e3
+        h_rp = np.array([rp_l(dd[:, i]) for i in range(P)]) * 1e3
+        out.update(H2H_AP=h_ap, H2H_RP=h_rp, H2H_AP_mean=float(h_ap.mean()), H2H_RP_mean=float(h_rp.mean()))
+    if ad_pair is not None and P > max(ad_pair):          # distance accuracy between two poses
+        i, j = ad_pair
+        D = np.linalg.norm(p[:, j] - p[:, i], axis=-1)    # (C, A)
+        Dc = np.linalg.norm(pc[j] - pc[i], axis=-1)
+        ad, rd = (D.mean(0) - Dc) * 1e3, 3 * D.std(0, ddof=1) * 1e3
+        out.update(AD=ad, RD=rd, AD_mean=float(np.abs(ad).mean()), RD_mean=float(rd.mean()))
     if ci:
         lo, hi = np.zeros((P, A)), np.zeros((P, A))
         for i in range(P):
@@ -55,6 +73,15 @@ def pose_metrics(p, R, pc, Rc, ci=False, rng=None):
                 lo[i, a], hi[i, a] = bootstrap_ci(p[:, i, a], rp_l, rng=rng)
         out['RP_l_ci'] = np.stack([lo, hi], -1) * 1e3
     return out
+
+
+SCALARS = ['AP_mean', 'AP_max', 'RP_mean', 'RP_max', 'APo_mean', 'APo_max', 'RPo_mean', 'RPo_max',
+           'H2H_AP_mean', 'H2H_RP_mean', 'AD_mean', 'RD_mean']
+
+
+def slim(m):
+    """Scalar aggregates plus per-pose AP/RP only (keeps large campaigns' JSON small)."""
+    return {k: v for k, v in m.items() if k in SCALARS or k in ('AP_p', 'RP_l')}
 
 
 def vap(groups):

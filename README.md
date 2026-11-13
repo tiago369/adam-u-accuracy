@@ -11,11 +11,11 @@ FK is logged in parallel to split servo error from kinematic error.
 
 1. **A perfect simulator measures nothing.** The ideal plant is bitwise deterministic (RP = 0) and lands within
    3.5 µm of the command. Every number below comes from error sources that we add on purpose, at declared levels.
-2. **Accuracy is set by calibration, not by the controller.** On a fleet of 30 virtual robots with every
-   mechanism on, AP has a median of 8.9 mm, a 90th percentile of 12.8 mm, and reaches 24 mm on the worst pose.
-   In the factorial, joint zero offsets explain 80 % of the AP variance, friction 8 % and the inertial model 5 %.
-   The encoder cannot see most of this: per robot, the servo part is 5.2 mm and the kinematic plus post-encoder
-   part is 8.1 mm (median).
+2. **Accuracy is set by calibration, not by the controller.** On a fleet of 2000 virtual robots with every
+   mechanism on, AP has a median of 8.05 mm, a 90th percentile of 11.6 mm, and reaches 29 mm on the worst pose of
+   the worst robot. In the factorial (32 cells × 30 robots × 30 cycles), joint zero offsets explain 73 % of the AP
+   variance (t = 33), friction 11 % and the inertial model 8 %. The encoder cannot see most of this: per robot, the
+   servo part is 5.4 mm and the kinematic plus post-encoder part is 7.1 mm (median).
 3. **ISO repeatability is optimistic for this robot.** In the ISO cycle every pose is always approached from the same
    direction, so friction and backlash become a fixed bias. RP stays between 0.06 and 0.09 mm in all 32 factorial
    cells, at the floor set by sensor and torque noise. If the approach direction changes, friction shows up:
@@ -25,8 +25,13 @@ FK is logged in parallel to split servo error from kinematic error.
 5. **An unmodelled 0.5 kg payload costs 93 mm** at the SDK gains. This is a servo error, so the encoders see it
    fully, and it is fixed by feed-forward or gains, not by calibration.
 6. **Instrument choice matters only below 0.1 mm.** The virtual mocap has a 0.045 mm floor and agrees with truth
-   within 8 µm on AP. On the noise-floor RP it reads 0.12 mm against a true 0.09 mm, below the 4:1 uncertainty
+   within 16 µm on the fleet AP. On the noise-floor RP it reads 0.12 mm against a true 0.09 mm, below the 4:1 uncertainty
    ratio. A laser tracker (floor 0.008 mm) is needed only if RP itself is the target.
+7. **The arm never fully settles, and it is soft.** With friction it creeps at about 100 µm/s and needs about 5 s to
+   enter a 0.2 mm band, so the measurement instant is part of the test definition. Static compliance at the TCP is
+   2.7-24 mm/N at P1 and up to 50 mm/N with the arm extended (SDK gains), which is why contact fixtures read their
+   own load. Per joint (ISO 230-2), the reversal error is 6-22 mrad and comes entirely from friction. Turning the
+   palm in instead of down changes the numbers by about 10 %, not the ranking.
 
 ## Results in figures
 
@@ -43,12 +48,19 @@ picture is different: friction and the inertial model dominate the servo error t
 
 ![Factorial effects on AP and RP](results/figures/e2_factorial.png)
 
-**The realistic robot (E3).** Left: AP of 30 virtual robots with every mechanism on, split into the part the
+**The realistic robot (E3).** Left: AP of 2000 virtual robots with every mechanism on, split into the part the
 encoders see (servo) and the part only an external instrument sees (kinematic + post-encoder). Right: approaching
 the same pose from six directions exposes friction (vAP 9-12 mm), which the one-direction ISO cycle hides. Backlash
 is preloaded by gravity and stays at the baseline.
 
 ![Fleet accuracy split and multi-directional accuracy](results/figures/e3_realistic.png)
+
+**The remaining blocks (E4).** Left: ISO 230-2 bidirectional test per joint. The reversal error is friction alone;
+backlash and compliance stay at the baseline because gravity preloads them. Right: AP read 2, 4 and 8 s after
+arrival. Friction keeps the arm creeping, so the measurement instant must be fixed by the procedure. The palm-in
+orientation, vAP at the extra poses P6/P7 and the static compliance matrices are tables in `SUMMARY.md`.
+
+![ISO 230-2 per joint and dwell sensitivity](results/figures/e4_extras.png)
 
 All numbers: [`results/SUMMARY.md`](results/SUMMARY.md).
 
@@ -110,22 +122,29 @@ python -c "import mujoco; m = mujoco.MjModel.from_xml_path('third_party/pnd_mujo
 
 ```bash
 ./run_all.sh --quick      # whole pipeline with few units/cycles: ~6 min on 4 cores, writes *_quick files
-./run_all.sh              # full campaign: ~45 min on 4 cores, writes results/*.json, figures, SUMMARY.md
+./run_all.sh              # full campaign: ~52 CPU-hours (about 6 h with ADAMU_PROCS=10), writes results/*.json, figures, SUMMARY.md
 ```
 
 `run_all.sh` uses `python` (set `PYTHON=.venv/bin/python` if the venv is not active). `ADAMU_PROCS` sets the number
-of worker processes (default min(4, ncpu-1); each needs about 60 MB). The steps can also be run one at a time:
+of worker processes (default min(4, ncpu-1); each needs about 60 MB). The steps can also be run one at a time.
+Times are those of the full campaign, measured with 10 processes:
 
 | Command | What it does | Full run |
 |---|---|---|
 | `python -m adam_u_accuracy.poses` | solves and freezes the ISO poses to `results/poses.json` | <1 s |
-| `python -m experiments.e0_verify` | determinism, noise floor, instrument floor, time-step convergence | ~3 min |
-| `python -m experiments.e1_ofat` | each error mechanism alone (9 cells) | ~3 min |
-| `python -m experiments.e2_factorial` | 2^(6-1) fractional factorial, 32 cells × 3 robots × 30 cycles | ~28 min |
-| `python -m experiments.e3_realistic` | 30-robot fleet, vAP from 6 directions, ISO vs random visit order | ~8 min |
+| `python -m experiments.e0_verify` | determinism, noise floor, instrument floor, time-step convergence | ~2 min |
+| `python -m experiments.e1_ofat` | each error mechanism alone (9 cells) | ~4 min |
+| `python -m experiments.e2_factorial` | 2^(6-1) fractional factorial, 32 cells × 30 robots × 30 cycles | ~37 CPU-h (~3.7 h) |
+| `python -m experiments.e3_realistic` | 2000-robot fleet × 3 cycles, vAP from 6 directions, ISO vs random visit order | ~14 CPU-h (~1.5 h) |
+| `python -m experiments.e4_extras` | palm-in poses, vAP at P6/P7, dwell and creep, ISO 230-2 per joint, static compliance | ~10 min |
 | `python -m experiments.report` | `results/SUMMARY.md` and `results/figures/*.png` from the JSON files | ~5 s |
 
 Every script takes `--quick` and `--procs N`. Raw states are saved to `results/raw/`, which is git-ignored.
+
+**Resuming an interrupted campaign.** Each finished job is cached in `results/raw/_cache/`, so rerunning the same
+command skips work already done. Setting `ADAMU_RESUME_SINCE=<unix time>` also reuses raw state files written after
+that time (metrics are recomputed; their timing is recorded as NaN). The published campaign was resumed this way
+once, after a power cut during E2.
 
 To look at the robot used in the tests (meshes are stripped for speed, so the bodies show as inertia boxes):
 
@@ -143,9 +162,9 @@ adam_u_accuracy/      the library
   poses.py            ISO 9283 cube, P1-P5, frozen damped-least-squares IK
   sim.py              1 kHz PD + nominal gravity feed-forward, the ISO cycle, window-averaged measurement
   instruments.py      ground truth, mocap, laser tracker, encoder FK
-  metrics.py          AP, RP (+ bootstrap CI), orientation AP/RP, vAP
-  campaign.py         parallel jobs with common random numbers
-experiments/          E0-E3 and the report
+  metrics.py          AP, RP (+ bootstrap CI), orientation AP/RP, vAP, AD/RD, hand-to-hand
+  campaign.py         parallel jobs with common random numbers, cached for resuming
+experiments/          E0-E4 and the report
 results/              poses, experiment JSON, figures, SUMMARY.md
 third_party/          PND submodules (model and official simulator)
 ```
@@ -180,12 +199,14 @@ up to 1.35 mm. E0 checks that halving the time step changes the barycentres by l
 (kp = 9-18 on the arm), quintic 2 s moves and a 4 s dwell.
 
 **Test.** An ISO 9283 cube of side 175 mm per arm, centred at (0.388, ±0.263, -0.013) m in the torso frame. P1 is
-the centre; P2-P5 lie on the diagonal plane, 10 % in from the corners. The tool is palm-down and both arms run the
-mirrored cycle at the same time. The cycle is P5→P1; 3 warm-up cycles are discarded, then 30 cycles are measured.
+the centre; P2-P5 lie on the diagonal plane, 10 % in from the corners. The tool is palm-down (palm-in repeated in E4) and both arms
+run the mirrored cycle at the same time. The cycle is P5→P1; 3 warm-up cycles are discarded, then 30 cycles are measured.
 Each measurement is the mean over 3.5-4.0 s of the dwell.
 
 **Metrics.** `AP_p = |mean(x) - x_c|`, `RP_l = l̄ + 3 S_l`, orientation `AP_a,b,c` and `RP_a,b,c = 3 S` about the tool
-axes, `vAP_p` across 6 approach directions, and a bootstrap 95 % CI on RP.
+axes, `vAP_p` across 6 approach directions, a bootstrap 95 % CI on RP, distance accuracy `AD/RD` between P2 and
+P4, hand-to-hand error (left TCP − right TCP), ISO 230-2 reversal `B` and repeatability `R` per joint, settling
+time, overshoot, creep rate and the static compliance matrix.
 
 **Random streams.** Unit *u* (one virtual robot) draws its parametric errors and its cycle noise from fixed seeds
 that are the same in every cell (common random numbers). The whole campaign is therefore reproducible, and
@@ -197,7 +218,7 @@ differences between cells are not sampling noise.
   calibrated against a reduced test on the real robot.
 - Instrument noise models are white and Gaussian, from vendor data. Registration of the instrument to the robot base
   is assumed perfect, and no camera images are rendered.
-- One tool orientation, one speed, the waist locked and the column fixed. No thermal drift and no link flexibility.
+- Two tool orientations, one speed, the waist locked and the column fixed. No thermal drift and no link flexibility.
 - The PD controller is the SDK example, not PND's on-board joint controller, which may include an integrator or
   friction compensation that would shrink the friction dead band.
 

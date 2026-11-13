@@ -3,7 +3,7 @@
 All mechanisms on at their declared levels (zero offsets 0.3 deg, link geometry 1 mm, mass 5 % / CoM 5 mm, friction
 0.1 N.m, backlash 0.2 deg, series compliance 3000 N.m/rad), SDK gains.
 
-  a. Fleet Monte Carlo: U virtual robots x 3 cycles of the ISO order. Accuracy varies between robots (each has its
+  a. Fleet Monte Carlo: 2000 virtual robots x 3 cycles of the ISO order (1 warm-up cycle). Accuracy varies between robots (each has its
      own geometry and offsets), so it needs many units and few cycles. Reported per instrument, and split into
      servo error (encoder FK - command, fixable by gains/feed-forward) and kinematic + post-encoder error
      (truth - encoder FK, fixable only by calibration).
@@ -21,7 +21,7 @@ import numpy as np
 from adam_u_accuracy.config import S_MIRROR, N_WARMUP, SETTLE, T_MOVE
 from adam_u_accuracy.model import Scenario
 from adam_u_accuracy.sim import Rig, Nominal
-from adam_u_accuracy.poses import LeftArmIK, R_PALM_DOWN, load_poses, POSES_JSON
+from adam_u_accuracy.poses import LeftArmIK, load_poses
 from adam_u_accuracy.campaign import run_jobs, scenario_dict, UNIT_SEED0, CYCLE_SEED0
 from adam_u_accuracy.metrics import pose_metrics, rp_l, vap
 from experiments.common import parse, save
@@ -34,35 +34,36 @@ DIRS = ['+x', '-x', '+y', '-y', '+z', '-z']
 APPROACH = 0.05
 
 
-def pre_poses():
-    """19-vector pre-poses: pose P approached along direction k starts at P - 50 mm * e_k (left arm; right mirrored)."""
-    import json
-    P = json.load(open(POSES_JSON))['poses']
+def pre_poses(which='palm_down', names=('P1', 'P2', 'P4'), approach=APPROACH):
+    """19-vector pre-poses: pose P approached along direction k starts at P - approach * e_k, same tool orientation
+    (left arm; right mirrored). Directions whose pre-pose is out of reach are left out."""
+    P = load_poses(which)
     ik = LeftArmIK()
     out = {}
-    for name in ['P1', 'P2', 'P4']:
-        p = np.array(P[name]['p_torso'])
+    for name in names:
+        p, R = ik.fk(P[name][5:12])
         for dname in DIRS:
             e = np.zeros(3); e['xyz'.index(dname[1])] = 1.0 if dname[0] == '+' else -1.0
-            q, ep, er = ik.solve(p - APPROACH * e, R_PALM_DOWN)
-            assert ep < 1e-5 and er < 1e-3, (name, dname, ep, er)
-            q19 = np.zeros(19); q19[5:12], q19[12:19] = q, S_MIRROR * q
-            out[f'{name}{dname}'] = q19
+            q, ep, er = ik.solve(p - approach * e, R)
+            if ep < 1e-5 and er < 1e-3:
+                q19 = np.zeros(19); q19[5:12], q19[12:19] = q, S_MIRROR * q
+                out[f'{name}{dname}'] = q19
     return out
 
 
 def job_vap(job):
     t0 = time.perf_counter()
     sc = Scenario(**job['scenario'])
-    rig = Rig(sc, UNIT_SEED0 + job['unit'])
+    rig = Rig(sc, UNIT_SEED0 + job['unit'], poses=job.get('poses', 'palm_down'))
     rng = np.random.default_rng(CYCLE_SEED0 + job['unit'])
     P, pre, name = rig.poses, job['pre'], job['pose']
+    dirs = [k for k in DIRS if f'{name}{k}' in pre]
     rig.reset(P[name])
     rig.segment(P[name], P[name], rng, T=0.0, dwell=SETTLE, record=False)
     cur = P[name]
-    meas = {k: [] for k in DIRS}
+    meas = {k: [] for k in dirs}
     for rep in range(job['n'] + 1):              # first round is warm-up
-        for dname in DIRS:
+        for dname in dirs:
             q_pre = np.array(pre[f'{name}{dname}'])
             rig.segment(cur, q_pre, rng, T=1.0, dwell=1.0, record=False)
             m = rig.segment(q_pre, P[name], rng, T=1.0)
@@ -72,11 +73,11 @@ def job_vap(job):
     pc, _ = rig.nom.fk(P[name])
     res = {}
     for a, arm in enumerate(['Left', 'Right']):
-        groups = [np.array(meas[k])[:, a] for k in DIRS]
-        res[arm] = dict(vAP=vap(groups),
-                        AP_dir={k: float(np.linalg.norm(g.mean(0) - pc[a]) * 1e3) for k, g in zip(DIRS, groups)},
-                        RP_dir={k: float(rp_l(g) * 1e3) for k, g in zip(DIRS, groups)},
-                        bary_dir_mm={k: (g.mean(0) - pc[a]) * 1e3 for k, g in zip(DIRS, groups)})
+        groups = [np.array(meas[k])[:, a] for k in dirs]
+        res[arm] = dict(vAP=vap(groups), dirs=dirs,
+                        AP_dir={k: float(np.linalg.norm(g.mean(0) - pc[a]) * 1e3) for k, g in zip(dirs, groups)},
+                        RP_dir={k: float(rp_l(g) * 1e3) for k, g in zip(dirs, groups)},
+                        bary_dir_mm={k: (g.mean(0) - pc[a]) * 1e3 for k, g in zip(dirs, groups)})
     return dict(cell=f"{job['plant']}/{name}", unit=job['unit'], plant=job['plant'], pose=name, res=res,
                 wall_s=time.perf_counter() - t0,
                 summary=f"vAP L {res['Left']['vAP']:.3f} mm R {res['Right']['vAP']:.3f} mm")
@@ -119,11 +120,11 @@ def main():
     out = {'scenario_all_on': scenario_dict(ALL_ON)}
 
     # a. fleet Monte Carlo
-    n_units = 4 if q else 30
+    n_units = 4 if q else 2000
     jobs = [dict(exp='e3_quick' if q else 'e3', cell='fleet', scenario=scenario_dict(ALL_ON), unit=u, n_cycles=3,
-                 instruments=['ground_truth', 'encoder_fk', 'mocap']) for u in range(n_units)]
+                 n_warmup=1, slim=True, instruments=['ground_truth', 'encoder_fk', 'mocap']) for u in range(n_units)]
     fleet = run_jobs(jobs, args.procs)
-    out['fleet'] = dict(n_units=n_units, n_cycles=3, runs=fleet)
+    out['fleet'] = dict(n_units=n_units, n_cycles=3, n_warmup=1, runs=fleet)
 
     # b. vAP
     pre = {k: v.tolist() for k, v in pre_poses().items()}

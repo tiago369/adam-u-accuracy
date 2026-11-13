@@ -63,8 +63,10 @@ def quintic(q0, q1, T, t):
 class Rig:
     """One virtual robot (plant) under one scenario, with its nominal controller."""
 
-    def __init__(self, sc: Scenario, unit_seed: int = 0, nominal: Nominal | None = None, substeps: int = 1):
-        """substeps > 1 refines the physics step (DT / substeps) while the controller stays at 1 kHz."""
+    def __init__(self, sc: Scenario, unit_seed: int = 0, nominal: Nominal | None = None, substeps: int = 1,
+                 poses='palm_down'):
+        """substeps > 1 refines the physics step (DT / substeps) while the controller stays at 1 kHz.
+        poses: 'palm_down' | 'palm_in' | 'extra' | dict name -> 19-vector."""
         self.sc = sc
         self.substeps = substeps
         self.nom = nominal if nominal is not None else Nominal()
@@ -77,7 +79,12 @@ class Rig:
         self.act = np.array([m.actuator(n).id for n in J19])
         self.sites = [m.site('tcp_l').id, m.site('tcp_r').id]
         self.kp, self.kd = GAINS[sc.gains]
-        self.poses = load_poses()
+        self.poses = load_poses(poses) if isinstance(poses, str) else {k: np.asarray(v) for k, v in poses.items()}
+        # true output-side joint angle = motor angle - zero offset + passive joints (series spring, backlash)
+        self.qpos0 = m.qpos0[self.qa].copy()
+        self.extra = [(i, m.joint(f'{n}{suf}').qposadr[0]) for i, n in enumerate(J19) for suf in ('_k', '_bl')
+                      if mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_JOINT, f'{n}{suf}') >= 0]
+        self.wrench = None            # (site index 0/1, force (3,) N) applied at the TCP, or None
         self.alpha = DT / (DT + 1 / (2 * np.pi * VEL_CUTOFF_HZ))
         self.nsteps = 0
 
@@ -91,6 +98,21 @@ class Rig:
         self.q_enc_prev = q19.copy()
         self.dq_f = np.zeros(19)
 
+    def link_angles(self):
+        q = self.d.qpos[self.qa] - self.qpos0
+        for i, adr in self.extra:
+            q[i] += self.d.qpos[adr]
+        return q
+
+    def _apply_wrench(self):
+        d = self.d
+        d.qfrc_applied[:] = 0
+        if self.wrench is not None:
+            s, F = self.wrench
+            sid = self.sites[s]
+            mujoco.mj_applyFT(self.m, d, np.asarray(F, float), np.zeros(3), d.site_xpos[sid].copy(),
+                              self.m.site_bodyid[sid], d.qfrc_applied)
+
     def _encoder(self, rng):
         self.hist.append(self.d.qpos[self.qa].copy())
         q = self.hist.pop(0)
@@ -99,14 +121,16 @@ class Rig:
         q = q + ENC_NOISE_LSB * ENC_LSB * rng.standard_normal(19)
         return np.round(q / ENC_LSB) * ENC_LSB
 
-    def segment(self, q0, q1, rng, T=T_MOVE, dwell=DWELL, record=True):
-        """Move q0 -> q1 in T s, dwell, and return the window-averaged measurement (or None)."""
+    def segment(self, q0, q1, rng, T=T_MOVE, dwell=DWELL, record=True, window=WINDOW, trace=False):
+        """Move q0 -> q1 in T s, dwell, and return the window-averaged measurement (or None).
+        trace=True also returns the TCP positions of every control period of the move and dwell ('trace', (n, 2, 3))."""
         n_move, n_dwell = int(round(T / DT)), int(round(dwell / DT))
-        lo, hi = int(round(WINDOW[0] / DT)), int(round(WINDOW[1] / DT))
+        lo, hi = int(round(window[0] / DT)), int(round(window[1] / DT))
+        tr = np.zeros((n_move + n_dwell, 2, 3)) if trace else None
         g_hold = self.nom.gravity(q1)
         zero = np.zeros(19)
         tau_noise = (TORQUE_NOISE if self.sc.noise else 0.0) * rng.standard_normal((n_move + n_dwell, 19))
-        acc_p, acc_R, acc_q, n = np.zeros((2, 3)), np.zeros((2, 3, 3)), np.zeros(19), 0
+        acc_p, acc_R, acc_q, acc_l, n = np.zeros((2, 3)), np.zeros((2, 3, 3)), np.zeros(19), np.zeros(19), 0
         d = self.d
         for k in range(n_move + n_dwell):
             if k < n_move:
@@ -118,30 +142,38 @@ class Rig:
             self.dq_f += self.alpha * ((q_enc - self.q_enc_prev) / DT - self.dq_f)
             self.q_enc_prev = q_enc
             d.ctrl[self.act] = g + self.kp * (qd - q_enc) + self.kd * (dqd - self.dq_f) + tau_noise[k]
+            if self.wrench is not None:
+                self._apply_wrench()
             mujoco.mj_step(self.m, d, self.substeps)
             self.nsteps += 1
+            if trace:
+                tr[k] = d.site_xpos[self.sites]
             j = k - n_move + 1                      # control periods since arrival
             if record and lo < j <= hi:
                 acc_p += d.site_xpos[self.sites]
                 acc_R += d.site_xmat[self.sites].reshape(2, 3, 3)
                 acc_q += q_enc
+                acc_l += self.link_angles()
                 n += 1
         if not record:
-            return None
+            return dict(trace=tr) if trace else None
         R = acc_R / n
         R = np.array([u @ vt for u, _, vt in (np.linalg.svd(Ri) for Ri in R)])   # project the mean onto SO(3)
-        return dict(p=acc_p / n, R=R, q_enc=acc_q / n)
+        out = dict(p=acc_p / n, R=R, q_enc=acc_q / n, q_link=acc_l / n)
+        if trace:
+            out['trace'] = tr
+        return out
 
     # ------------------------------------------------------------------ ISO 9283 cycle
     def run_cycles(self, n_cycles, cycle_seed=0, n_warmup=N_WARMUP, sequence=SEQUENCE):
         """Settle at P1, run n_warmup + n_cycles cycles of `sequence`; returns arrays over the measured cycles:
-        p (C, 5, 2, 3), R (C, 5, 2, 3, 3), q_enc (C, 5, 19)."""
+        p (C, 5, 2, 3), R (C, 5, 2, 3, 3), q_enc and q_link (C, 5, 19)."""
         rng = np.random.default_rng(cycle_seed)
         P = self.poses
         self.reset(P['P1'])
         self.segment(P['P1'], P['P1'], rng, T=0.0, dwell=SETTLE, record=False)
         prev = 'P1'
-        out = dict(p=[], R=[], q_enc=[])
+        out = dict(p=[], R=[], q_enc=[], q_link=[])
         for c in range(n_warmup + n_cycles):
             meas = []
             for name in sequence:
