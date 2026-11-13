@@ -219,6 +219,10 @@ differences between cells are not sampling noise.
 - Instrument noise models are white and Gaussian, from vendor data. Registration of the instrument to the robot base
   is assumed perfect, and no camera images are rendered.
 - Two tool orientations, one speed, the waist locked and the column fixed. No thermal drift and no link flexibility.
+- Designed in the proposal but not run here: a speed block, the payload as a *modelled* load (only the unmodelled
+  case is run), 100-200-cycle cells for a ±10 % estimate of σ, the ISO tolerance factor k = 3.90, covariance
+  ellipsoids of the attained positions, a stationarity check over the cycles, and gauge R&R of the virtual instrument.
+  None of them is expected to change the conclusions above; they are the next steps.
 - The PD controller is the SDK example, not PND's on-board joint controller, which may include an integrator or
   friction compensation that would shrink the friction dead band.
 
